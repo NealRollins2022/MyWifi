@@ -42,3 +42,18 @@
 		};
 	};
 };
+/ {
+    chosen {
+        zephyr,wifi = &nrf7002;
+    };
+};
+
+&nrf7002 {
+    compatible = "nordic,nrf7002";
+    label = "NRF_WIFI";
+    spi-max-frequency = <8000000>;
+    spi = <&spi1>;
+    reset-gpios = <&gpio0 24 GPIO_ACTIVE_LOW>;
+    wake-gpios = <&gpio0 25 GPIO_ACTIVE_HIGH>;
+    irq-gpios = <&gpio0 26 GPIO_ACTIVE_HIGH>;
+};

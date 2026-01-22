@@ -6,16 +6,19 @@
 
 #include <zephyr/device.h>
 #include <zephyr/kernel.h>
-
+#include <dk_buttons_and_leds.h>
 #include <drivers/video.h>
 #include <drivers/video/arducam_mega.h>
 
 #include <zephyr/drivers/uart.h>
-
+#include <zephyr/net/wifi.h>
+#include <zephyr/net/wifi_mgmt.h>
+#include <zephyr/net/net_mgmt.h>
+#include <net/wifi_mgmt_ext.h>
 #define LOG_LEVEL CONFIG_LOG_DEFAULT_LEVEL
 #include <zephyr/logging/log.h>
 LOG_MODULE_REGISTER(main);
-
+#define EVENT_MASK (NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED)
 #define RESET_CAMERA             0XFF
 #define SET_PICTURE_RESOLUTION   0X01
 #define SET_VIDEO_RESOLUTION     0X02
@@ -45,8 +48,9 @@ LOG_MODULE_REGISTER(main);
 #define NUM_BUFFERS 3
 #define MAX_SPI_BURST 4096
 #define DMA_BUF_SIZE  (MAX_SPI_BURST + 8)
-
-
+static struct net_mgmt_event_callback mgmt_cb;
+static bool connected;
+static K_SEM_DEFINE(run_app, 0, 1);
 /* DMA-safe buffers for video frames */
 static uint8_t dma_bufs[NUM_BUFFERS][DMA_BUF_SIZE] __aligned(4)
                          __attribute__((section(".dma")));
@@ -62,7 +66,45 @@ struct video_buffer *vbuf;
 
 volatile uint8_t preview_on;
 volatile uint8_t capture_flag;
+static void net_mgmt_event_handler(struct net_mgmt_event_callback *cb,
+                                   uint32_t mgmt_event, struct net_if *iface)
+{
+    if ((mgmt_event & EVENT_MASK) != mgmt_event) {
+        return;
+    }
 
+    if (mgmt_event == NET_EVENT_L4_CONNECTED) {
+        LOG_INF("Wi-Fi connected");
+        connected = true;
+        dk_set_led_on(DK_LED1);
+        k_sem_give(&run_app);  // unblock main thread -> camera can start now
+    } else if (mgmt_event == NET_EVENT_L4_DISCONNECTED) {
+        connected = false;
+        dk_set_led_off(DK_LED1);
+        LOG_INF("Wi-Fi disconnected");
+    }
+}
+
+/* STEP 7 - Define the function to populate the Wi-Fi credential parameters */
+static int wifi_args_to_params(struct wifi_connect_req_params *params)
+{
+
+	/* STEP 7.1 Populate the SSID and password */
+	params->ssid = CONFIG_WIFI_CREDENTIALS_STATIC_SSID;
+	params->ssid_length = strlen(params->ssid);
+
+	params->psk = CONFIG_WIFI_CREDENTIALS_STATIC_PASSWORD;
+	params->psk_length = strlen(params->psk);
+
+	/* STEP 7.2 - Populate the rest of the relevant members */
+	params->channel = WIFI_CHANNEL_ANY;
+	params->security = WIFI_SECURITY_TYPE_PSK;
+	params->mfp = WIFI_MFP_OPTIONAL;
+	params->timeout = SYS_FOREVER_MS;
+	params->band = WIFI_FREQ_BAND_UNKNOWN;
+	memset(params->bssid, 0, sizeof(params->bssid));
+	return 0;
+}
 void serial_cb(const struct device *dev, void *user_data);
 
 const uint32_t pixel_format_table[] = {
@@ -317,6 +359,42 @@ uint8_t uart_available(uint8_t *p)
 
 int main(void)
 {
+
+/* STEP 8.1 - Declare the variable for the network configuration parameters */
+	struct wifi_connect_req_params cnx_params;
+
+	/* STEP 8.2 - Get the network interface */
+	struct net_if *iface = net_if_get_first_wifi();
+	if (iface == NULL) {
+		LOG_ERR("Returned network interface is NULL");
+		return -1;
+	}
+
+	if (dk_leds_init() != 0) {
+		LOG_ERR("Failed to initialize the LED library");
+	}
+
+	/* Sleep to allow initialization of Wi-Fi driver */
+	k_sleep(K_SECONDS(1));
+
+	/* STEP 9 - Initialize and add the callback function for network events */
+	net_mgmt_init_event_callback(&mgmt_cb, net_mgmt_event_handler, EVENT_MASK);
+	net_mgmt_add_event_callback(&mgmt_cb);
+
+	/* STEP 10 - Populate cnx_params with the network configuration */
+	wifi_args_to_params(&cnx_params);
+
+	/* STEP 11 - Call net_mgmt() to request the Wi-Fi connection */
+	LOG_INF("Connecting to Wi-Fi");
+	int err = net_mgmt(NET_REQUEST_WIFI_CONNECT, iface, &cnx_params, sizeof(struct wifi_connect_req_params));
+	if (err) {
+		LOG_ERR("Connecting to Wi-Fi failed, err: %d", err);
+		return ENOEXEC;
+	}
+
+	 // **BLOCK here until Wi-Fi is connected**
+    k_sem_take(&run_app, K_FOREVER);
+
 	uint8_t recv_buffer[12] = {0};
 	struct video_buffer *buffers[3];
 	int i = 0;
